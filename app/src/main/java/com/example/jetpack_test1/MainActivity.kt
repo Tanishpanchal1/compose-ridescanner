@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             RideScannerTheme {
-                AppEntryPoint()
+                Splash()
             }
         }
     }
