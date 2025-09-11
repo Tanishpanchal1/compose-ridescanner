@@ -1,3 +1,10 @@
 <resources>
-    <string name="app_name">jetpack_test1</string>
+    <string name="app_name">Ride Scanner</string>
+
+    <!-- CRITICAL: These strings MUST exist -->
+    <string name="accessibility_service_label">Ride Scanner Automation</string>
+    <string name="accessibility_service_description">
+        Automatically extracts live ride pricing from Uber, Ola, and Rapido apps.
+        This service only activates when you search for rides and helps you find the best prices across all platforms.
+    </string>
 </resources>

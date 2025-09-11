@@ -2,6 +2,7 @@ package com.example.jetpack_test1
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.location.Location
@@ -14,12 +15,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,6 +34,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
@@ -40,8 +47,6 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -62,6 +67,17 @@ data class RideOption(
     val deepLink: String = ""
 )
 
+data class AppInstallStatus(
+    val appName: String,
+    val displayName: String,
+    val packageName: String,
+    val isInstalled: Boolean,
+    val color: Long,
+    val description: String
+)
+
+// ... (keep existing functions fetchOpenStreetMapSuggestions, getCurrentLocation, generateStaticRideData, launchRideApp)
+
 suspend fun fetchOpenStreetMapSuggestions(query: String): List<NominatimPlace> {
     val client = HttpClient(Android) {
         install(ContentNegotiation) {
@@ -73,11 +89,9 @@ suspend fun fetchOpenStreetMapSuggestions(query: String): List<NominatimPlace> {
     }
 
     Log.d("OSM_DEBUG", "Request URL: https://nominatim.openstreetmap.org/search?format=json&q=${Uri.encode(query)}&limit=5")
-
     return try {
         if (query.isBlank() || query.length < 3) return emptyList()
         Log.d("OSM_API", "Making request for: '$query'")
-
         val result: List<NominatimPlace> = client.get("http://nominatim.openstreetmap.org/search") {
             parameter("format", "json")
             parameter("q", query)
@@ -87,7 +101,6 @@ suspend fun fetchOpenStreetMapSuggestions(query: String): List<NominatimPlace> {
                 append("User-Agent", "RideScanner/1.0 (android.app)")
             }
         }.body()
-
         Log.d("OSM_DEBUG", "Raw response: $result")
         Log.d("OSM_DEBUG", "Response size: ${result.size}")
         Log.d("OSM_API", "SUCCESS: Found ${result.size} suggestions")
@@ -110,7 +123,6 @@ fun getCurrentLocation(context: Context, onResult: (lat: Double, lng: Double) ->
         val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
             .setMaxUpdates(1)
             .build()
-
         fusedLocationClient.requestLocationUpdates(
             locationRequest,
             object : LocationCallback() {
@@ -140,7 +152,6 @@ fun getCurrentLocation(context: Context, onResult: (lat: Double, lng: Double) ->
     }
 }
 
-// Fallback function for when automation fails
 fun generateStaticRideData(pickup: LocationCoords, dropoff: LocationCoords): List<RideOption> {
     return listOf(
         RideOption(
@@ -183,15 +194,37 @@ fun launchRideApp(context: Context, deepLink: String) {
     }
 }
 
+/**
+ * Function to open Play Store for app installation
+ */
+fun openPlayStore(context: Context, packageName: String) {
+    try {
+        // Try to open Play Store app directly
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("market://details?id=$packageName")
+            setPackage("com.android.vending")
+        }
+        context.startActivity(intent)
+        Log.d("PLAY_STORE", "Opened Play Store app for: $packageName")
+    } catch (e: ActivityNotFoundException) {
+        // Fallback to web browser if Play Store app is not available
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$packageName"))
+            context.startActivity(intent)
+            Log.d("PLAY_STORE", "Opened Play Store web for: $packageName")
+        } catch (e2: Exception) {
+            Log.e("PLAY_STORE", "Failed to open Play Store: ${e2.message}")
+        }
+    }
+}
+
 @Composable
 fun HomeScreen(navController: NavHostController) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // Initialize automation service with caching
-    val automationService = remember {
-        CachedAutomationService(RideAutomationService())
-    }
+    // Initialize real-time automation service
+    val realTimeService = remember { RealTimeAutomationService(context) }
 
     // Permission state
     var locationPermissionGranted by remember { mutableStateOf(false) }
@@ -216,9 +249,14 @@ fun HomeScreen(navController: NavHostController) {
     var loading by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<RideOption>>(emptyList()) }
 
+    // App installation state
+    var appInstallationStatus by remember { mutableStateOf<List<AppInstallStatus>>(emptyList()) }
+    var showAppCards by remember { mutableStateOf(true) }
+
     // Automation status
     var automationStatus by remember { mutableStateOf("Ready") }
     var usingFallback by remember { mutableStateOf(false) }
+    var accessibilityRequired by remember { mutableStateOf(false) }
 
     // Request permission on launch
     LaunchedEffect(Unit) {
@@ -251,6 +289,30 @@ fun HomeScreen(navController: NavHostController) {
         }
     }
 
+    // Check app installation status
+    LaunchedEffect(Unit) {
+        val supportedApps = realTimeService.getSupportedApps()
+        val installationStatus = supportedApps.map { (key, config) ->
+            val isInstalled = realTimeService.getAppInstallationStatus()[key] ?: false
+            AppInstallStatus(
+                appName = key,
+                displayName = config.displayName,
+                packageName = config.packageName,
+                isInstalled = isInstalled,
+                color = config.color,
+                description = when (key) {
+                    "uber" -> "Global ride-hailing service"
+                    "ola" -> "India's leading ride-sharing app"
+                    "rapido" -> "Bike taxi & auto rides"
+                    "nammayatri" -> "Zero commission ride app"
+                    "blusmart" -> "Electric cab service (Suspended)"
+                    else -> "Ride-hailing service"
+                }
+            )
+        }
+        appInstallationStatus = installationStatus
+    }
+
     // Autocomplete search
     LaunchedEffect(destination) {
         if (destination.isBlank()) {
@@ -268,7 +330,6 @@ fun HomeScreen(navController: NavHostController) {
         isSearching = true
         delay(800) // Debounce
         Log.d("AUTOCOMPLETE", "Starting search for: '$destination'")
-
         coroutineScope.launch {
             try {
                 val newSuggestions = fetchOpenStreetMapSuggestions(destination)
@@ -295,6 +356,69 @@ fun HomeScreen(navController: NavHostController) {
                     .fillMaxWidth()
                     .padding(top = 36.dp)
             ) {
+                // App Installation Status Cards
+                if (showAppCards && appInstallationStatus.isNotEmpty()) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF272727)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "📱 Ride Apps Status",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                TextButton(
+                                    onClick = { showAppCards = false }
+                                ) {
+                                    Text("Hide", color = Color(0xFF888888), fontSize = 12.sp)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(horizontal = 4.dp)
+                            ) {
+                                items(appInstallationStatus) { appStatus ->
+                                    AppStatusCard(
+                                        appStatus = appStatus,
+                                        onInstallClick = { packageName ->
+                                            openPlayStore(context, packageName)
+                                        }
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            val installedCount = appInstallationStatus.count { it.isInstalled }
+                            val totalCount = appInstallationStatus.size
+
+                            Text(
+                                text = "✅ $installedCount/$totalCount apps installed • Tap missing apps to download",
+                                color = Color(0xFF888888),
+                                fontSize = 11.sp,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
                 // Input form
                 Box(
                     modifier = Modifier
@@ -404,19 +528,38 @@ fun HomeScreen(navController: NavHostController) {
                         }
 
                         // Automation status indicator
-                        if (automationStatus != "Ready" || usingFallback) {
+                        if (automationStatus != "Ready" || usingFallback || accessibilityRequired) {
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(
-                                    containerColor = if (usingFallback) Color(0xFFFF6B35).copy(alpha = 0.2f) else Color(0xFF4CAF50).copy(alpha = 0.2f)
+                                    containerColor = when {
+                                        accessibilityRequired -> Color(0xFFE91E63).copy(alpha = 0.2f)
+                                        usingFallback -> Color(0xFFFF6B35).copy(alpha = 0.2f)
+                                        else -> Color(0xFF4CAF50).copy(alpha = 0.2f)
+                                    }
                                 )
                             ) {
-                                Text(
-                                    text = if (usingFallback) "Using offline data - Automation unavailable" else "Status: $automationStatus",
-                                    modifier = Modifier.padding(8.dp),
-                                    color = if (usingFallback) Color(0xFFFF6B35) else Color(0xFF4CAF50),
-                                    fontSize = 12.sp
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = when {
+                                            accessibilityRequired -> "⚠️ Accessibility Service Required - Tap to Enable"
+                                            usingFallback -> "📱 Using offline estimates - Live data unavailable"
+                                            else -> "Status: $automationStatus"
+                                        },
+                                        color = when {
+                                            accessibilityRequired -> Color(0xFFE91E63)
+                                            usingFallback -> Color(0xFFFF6B35)
+                                            else -> Color(0xFF4CAF50)
+                                        },
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
                             }
                         }
 
@@ -429,44 +572,33 @@ fun HomeScreen(navController: NavHostController) {
                                 val dropoff = destinationCoords
                                 if (pickup != null && dropoff != null) {
                                     loading = true
-                                    usingFallback = false
-                                    automationStatus = "Connecting to automation service..."
-
-                                    Log.d("RIDE_SEARCH", "Searching rides from ${pickup.lat}, ${pickup.lng} to ${dropoff.lat}, ${dropoff.lng}")
-
+                                    automationStatus = "Getting smart price estimates..."
                                     coroutineScope.launch {
                                         try {
-                                            automationStatus = "Extracting real-time data..."
+                                            // Phase 1: Get instant smart estimates
+                                            val estimates = realTimeService.getRealTimeRides(pickup, dropoff)
+                                            results = estimates
+                                            automationStatus = "✅ Smart estimates ready!"
+                                            delay(1500)
 
-                                            val automationRequest = RideAutomationService.AutomationRequest(
+                                            // Phase 2: Open apps with deep links
+                                            automationStatus = "🔗 Opening apps with your route..."
+                                            realTimeService.openAppsWithDeepLinks(
                                                 pickup = pickup,
                                                 dropoff = dropoff,
-                                                services = listOf("uber", "ola", "rapido")
+                                                onProgress = { status ->
+                                                    automationStatus = status
+                                                },
+                                                onComplete = {
+                                                    automationStatus = "Ready for next search"
+                                                }
                                             )
-
-                                            val realTimeResults = automationService.getRealTimeRides(automationRequest)
-
-                                            if (realTimeResults.isNotEmpty()) {
-                                                results = realTimeResults
-                                                automationStatus = "Real-time data loaded successfully"
-                                                usingFallback = false
-                                                Log.d("RIDE_SEARCH", "Found ${realTimeResults.size} real-time ride options")
-                                            } else {
-                                                throw Exception("No real-time data available")
-                                            }
-
                                         } catch (e: Exception) {
-                                            Log.e("RIDE_SEARCH", "Automation failed, using fallback: ${e.message}")
-                                            automationStatus = "Automation failed - using offline data"
-                                            usingFallback = true
+                                            Log.e("RIDE_SEARCH", "Error: ${e.message}")
+                                            automationStatus = "Using fallback estimates"
                                             results = generateStaticRideData(pickup, dropoff)
                                         } finally {
                                             loading = false
-                                            // Reset status after 3 seconds
-                                            delay(3000)
-                                            if (automationStatus != "Ready") {
-                                                automationStatus = "Ready"
-                                            }
                                         }
                                     }
                                 }
@@ -475,9 +607,7 @@ fun HomeScreen(navController: NavHostController) {
                                 containerColor = Color(0xFF5DCC06),
                                 contentColor = Color.Black
                             ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(56.dp)
+                            modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
                             if (loading) {
                                 CircularProgressIndicator(
@@ -485,6 +615,8 @@ fun HomeScreen(navController: NavHostController) {
                                     color = Color.Black,
                                     strokeWidth = 2.dp
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Opening Apps...", fontSize = 16.sp)
                             } else {
                                 val buttonText = when {
                                     !locationPermissionGranted -> "Grant Location Permission"
@@ -492,8 +624,19 @@ fun HomeScreen(navController: NavHostController) {
                                     destinationCoords == null -> "Select Destination"
                                     else -> "Find Rides"
                                 }
-                                Text(buttonText, fontSize = 18.sp)
+                                Text(buttonText, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                             }
+                        }
+
+                        // Info text
+                        if (!loading && results.isEmpty() && currentCoords != null && destinationCoords != null) {
+                            Text(
+                                text = "💡 Get smart estimates + open installed ride apps with your exact route",
+                                color = Color(0xFF888888),
+                                fontSize = 11.sp,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
@@ -528,7 +671,8 @@ fun HomeScreen(navController: NavHostController) {
                                                         "Uber" -> Color(0xFF000000)
                                                         "Ola" -> Color(0xFF00C853)
                                                         "Namma Yatri" -> Color(0xFF2196F3)
-                                                        else -> Color(0xFFFF5722)
+                                                        "Rapido" -> Color(0xFFFF5722)
+                                                        else -> Color(0xFF666666)
                                                     },
                                                     RoundedCornerShape(20.dp)
                                                 ),
@@ -556,25 +700,21 @@ fun HomeScreen(navController: NavHostController) {
                                                 color = Color.LightGray,
                                                 fontSize = 14.sp
                                             )
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    "TAP TO BOOK",
-                                                    color = Color.Cyan,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                                if (usingFallback) {
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        "• ESTIMATE",
-                                                        color = Color.Red,
-                                                        fontSize = 10.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-                                            }
+                                        }
+
+                                        Column(horizontalAlignment = Alignment.End) {
+                                            Text(
+                                                "TAP TO BOOK",
+                                                color = Color.Cyan,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                if (usingFallback) "ESTIMATE" else "LIVE PRICE",
+                                                color = if (usingFallback) Color(0xFFFFA500) else Color(0xFF4CAF50),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
                                     }
 
@@ -622,6 +762,108 @@ fun HomeScreen(navController: NavHostController) {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppStatusCard(
+    appStatus: AppInstallStatus,
+    onInstallClick: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .width(140.dp)
+            .height(120.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (appStatus.isInstalled)
+                Color(appStatus.color).copy(alpha = 0.15f)
+            else
+                Color(0xFF1E1E1E)
+        ),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // App icon placeholder
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(
+                        Color(appStatus.color),
+                        RoundedCornerShape(16.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = appStatus.displayName.take(1),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            }
+
+            // App name
+            Text(
+                text = appStatus.displayName,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+
+            // Status and action
+            if (appStatus.isInstalled) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "Installed",
+                        tint = Color(0xFF4CAF50),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Installed",
+                        color = Color(0xFF4CAF50),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else {
+                Button(
+                    onClick = { onInstallClick(appStatus.packageName) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF5DCC06),
+                        contentColor = Color.Black
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp),
+                    contentPadding = PaddingValues(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = "Download",
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Install",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
